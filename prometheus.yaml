@@ -1,0 +1,87 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+remote_write:
+  - url: ${REMOTE_WRITE_URL}
+    basic_auth:
+      username: ${REMOTE_WRITE_USERNAME}
+      password: ${REMOTE_WRITE_PASSWORD}
+    queue_config:
+      capacity: 2000
+      max_shards: 5
+      min_shards: 1
+      max_samples_per_send: 500
+      batch_send_deadline: 5s
+      min_backoff: 10ms
+      max_backoff: 500ms
+    write_relabel_configs:
+      - source_labels: [job]
+        regex: "pebble-flex-amd-dme|vllm-metrics"
+        action: keep
+
+scrape_configs:
+  - job_name: "kubernetes-pods"
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_name]
+        regex: ".*kepler.*"
+        action: drop
+      - source_labels: [__meta_kubernetes_pod_name]
+        regex: ".*node-exporter.*"
+        action: drop
+
+  - job_name: "pebble-flex-amd-dme"
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: endpoints
+        attach_metadata:
+          node: true
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        regex: ".*metrics-exporter.*"
+        action: keep
+      - source_labels: [__meta_kubernetes_node_label_topology_kubernetes_io_region]
+        target_label: region
+      - target_label: clusterName
+        replacement: ${CLUSTER_NAME}
+      - target_label: tenantId
+        replacement: ${TENANT_ID}
+      - target_label: clusterId
+        replacement: ${CLUSTER_ID}
+      - target_label: isAnomaly
+        replacement: "false"
+
+  - job_name: "vllm-metrics"
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+        attach_metadata:
+          node: true
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app, __meta_kubernetes_pod_label_app_kubernetes_io_name, __meta_kubernetes_pod_name]
+        regex: ".*vllm.*"
+        action: keep
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node_name
+      - source_labels: [__meta_kubernetes_node_label_topology_kubernetes_io_region]
+        target_label: region
+      - source_labels: [__meta_kubernetes_node_label_node_kubernetes_io_instance_type]
+        target_label: instance_type
+      - target_label: clusterName
+        replacement: ${CLUSTER_NAME}
+      - target_label: tenantId
+        replacement: ${TENANT_ID}
+      - target_label: clusterId
+        replacement: ${CLUSTER_ID}
+      - target_label: cloud
+        replacement: ${CLOUD}
+      - target_label: isAnomaly
+        replacement: "false"

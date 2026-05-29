@@ -1,0 +1,123 @@
+---
+# lmstack-router discovers vLLM pods by label via Kubernetes pod-IP discovery,
+# probes /v1/models on each pod, and routes with round-robin across backends.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-router-sa
+  namespace: vllm
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-router-pod-reader
+  namespace: vllm
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "watch", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-router-pod-reader-binding
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: llm-router-sa
+    namespace: vllm
+roleRef:
+  kind: Role
+  name: llm-router-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llm-router
+  namespace: vllm
+  labels:
+    app: llm-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-router
+  template:
+    metadata:
+      labels:
+        app: llm-router
+    spec:
+      serviceAccountName: llm-router-sa
+      containers:
+        - name: router
+          image: lmcache/lmstack-router:latest
+          imagePullPolicy: Always
+          ports:
+            - name: router-port
+              containerPort: 8001
+            - name: lmcache-port
+              containerPort: 9000
+          args:
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8001"
+            - "--service-discovery"
+            - "k8s"
+            - "--k8s-namespace"
+            - "vllm"
+            - "--k8s-label-selector"
+            - "app=vllm-llama"
+            - "--k8s-service-discovery-type"
+            - "pod-ip"
+            - "--routing-logic"
+            - "roundrobin"
+          env:
+            - name: PYTHONHASHSEED
+              value: "123"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-router
+  namespace: vllm
+  labels:
+    app: llm-router
+spec:
+  type: ClusterIP
+  selector:
+    app: llm-router
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8001
+      protocol: TCP

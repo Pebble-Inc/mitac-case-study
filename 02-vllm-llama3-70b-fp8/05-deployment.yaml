@@ -1,0 +1,200 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama-fp8
+  namespace: vllm
+  labels:
+    app: vllm-llama
+    flex_workload_type: realtime-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-llama
+  strategy:
+    type: Recreate  # GPU workloads should not run rolling updates
+  template:
+    metadata:
+      labels:
+        app: vllm-llama
+        flex_workload_type: realtime-inference
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+        sonar.pebble.io/probe-opt-in: "true"
+        sonar.pebble.io/probe-step-duration: "90"
+        sonar.pebble.io/probe-max-steps: "8"
+        sonar.pebble.io/probe-max-degradation: "5"
+        sonar.pebble.io/sla: "vllm:generation_tokens_total > 2000"
+    spec:
+      securityContext:
+        seccompProfile:
+          type: Unconfined
+
+      tolerations:
+        - key: "amd.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      # Pin to a specific 8-GPU AMD node; change to match your cluster.
+      nodeSelector:
+        kubernetes.io/hostname: mi350x-4
+
+      containers:
+        - name: vllm
+          # ROCm build: https://hub.docker.com/r/vllm/vllm-openai-rocm/tags
+          image: vllm/vllm-openai-rocm:v0.16.0
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+
+          args:
+            - "--model"
+            - "$(MODEL_ID)"
+            - "--dtype"
+            - "$(DTYPE)"
+            - "--tensor-parallel-size"
+            - "$(TENSOR_PARALLEL_SIZE)"
+            - "--gpu-memory-utilization"
+            - "$(GPU_MEMORY_UTILIZATION)"
+            - "--max-model-len"
+            - "$(MAX_MODEL_LEN)"
+            - "--swap-space"
+            - "$(SWAP_SPACE)"
+            - "--block-size"
+            - "$(BLOCK_SIZE)"
+            - "--max-num-seqs"
+            - "$(MAX_NUM_SEQS)"
+            - "--max-num-batched-tokens"
+            - "$(MAX_NUM_BATCHED_TOKENS)"
+            - "--enable-chunked-prefill"
+            # enforce-eager is REQUIRED on ROCm (no stable HIP graph support)
+            - "--enforce-eager"
+            - "--disable-log-requests"
+            - "--no-enable-prefix-caching"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "$(API_PORT)"
+            - "--chat-template"
+            - "/home/vllm/chat_template.jinja"
+
+          envFrom:
+            - configMapRef:
+                name: vllm-config
+
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+            - name: HF_HOME
+              value: "/root/.cache/huggingface"
+            - name: RCCL_DEBUG
+              value: "WARN"
+            - name: RCCL_ENABLE_XGMI
+              value: "1"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: VLLM_ROCM_USE_AITER
+              value: "1"
+            - name: VLLM_USE_TRITON_FLASH_ATTN
+              value: "1"
+            - name: PYTORCH_TUNABLEOP_ENABLED
+              value: "1"
+            - name: HSA_FORCE_FINE_GRAIN_PCIE
+              value: "1"
+            - name: GPU_MAX_HW_QUEUES
+              value: "2"
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]
+
+          resources:
+            requests:
+              amd.com/gpu: "8"
+            limits:
+              amd.com/gpu: "8"
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 40
+            timeoutSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            failureThreshold: 5
+            timeoutSeconds: 10
+
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            - name: model-local
+              mountPath: /models/Llama-3.1-70B-Instruct-FP8
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm
+            - name: chat-template
+              mountPath: /home/vllm/chat_template.jinja
+              subPath: chat_template.jinja
+            - name: kfd
+              mountPath: /dev/kfd
+            - name: dri
+              mountPath: /dev/dri
+
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /mnt/data/vllm-model-cache
+            type: DirectoryOrCreate
+        - name: model-local
+          hostPath:
+            path: /mnt/data/vllm-model-cache/meta-llama/Llama-3.1-70B-Instruct-FP8
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: chat-template
+          configMap:
+            name: vllm-chat-template
+        - name: kfd
+          hostPath:
+            path: /dev/kfd
+            type: CharDevice
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+
+      terminationGracePeriodSeconds: 120

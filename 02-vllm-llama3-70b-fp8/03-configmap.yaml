@@ -1,0 +1,61 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-config
+  namespace: vllm
+  labels:
+    app: vllm-llama
+data:
+  # Local path inside the pod (hostPath mount); offline mode avoids HF Hub lookups.
+  MODEL_ID: "/models/Llama-3.1-70B-Instruct-FP8"
+  # TP=8 across all MI300X/MI350X GPUs on the node
+  TENSOR_PARALLEL_SIZE: "8"
+  DTYPE: "auto"
+
+  # MI300X has 192 GB HBM3 per GPU; 0.90 leaves headroom for ROCm runtime and RCCL buffers
+  GPU_MEMORY_UTILIZATION: "0.90"
+  MAX_MODEL_LEN: "32768"
+
+  MAX_NUM_SEQS: "8192"
+  MAX_NUM_BATCHED_TOKENS: "32768"
+
+  ENABLE_CHUNKED_PREFILL: "true"
+  ENFORCE_EAGER: "true"
+  SWAP_SPACE: "0"
+  BLOCK_SIZE: "16"
+
+  API_PORT: "8000"
+  MAX_LOG_LEN: "32768"
+  DISABLE_LOG_REQUESTS: "false"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-chat-template
+  namespace: vllm
+data:
+  chat_template.jinja: |
+    {%- set system_message = "" -%}
+    {%- for message in messages -%}
+      {%- if message.role == "system" -%}
+        {%- set system_message = message.content -%}
+      {%- endif -%}
+    {%- endfor -%}
+    <|begin_of_text|>
+    {%- if system_message -%}
+    <|start_header_id|>system<|end_header_id|>
+
+    {{ system_message }}<|eot_id|>
+    {%- endif -%}
+    {%- for message in messages -%}
+      {%- if message.role != "system" -%}
+    <|start_header_id|>{{ message.role }}<|end_header_id|>
+
+    {{ message.content }}<|eot_id|>
+      {%- endif -%}
+    {%- endfor -%}
+    <|start_header_id|>assistant<|end_header_id|>
+
+
